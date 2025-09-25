@@ -11,7 +11,7 @@
 #TAILSCALE_TAILNET   ===== hardiniamber1260.github
 
 
-name: RDP4 with Persistent Storage
+name: RDP4 with Persistent Storage and Proper Cancellation
 
 on:
   workflow_dispatch:
@@ -42,6 +42,16 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global pull.rebase false
      
+      - name: Create cancellation handler script
+        run: |
+          @"
+          # Cancellation handler script
+          `$cancelFile = "C:\cancel_workflow.txt"
+          if (Test-Path `$cancelFile) {
+              Remove-Item `$cancelFile -Force
+          }
+          "@ | Out-File -FilePath "C:\cancel_handler.ps1" -Encoding UTF8
+          
       - name: Configure Core RDP Settings
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
@@ -53,28 +63,17 @@ jobs:
           
       - name: Configure RDP Session Timeout Settings
         run: |
-          # Disable automatic logoff for disconnected sessions
           Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "MaxDisconnectionTime" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "MaxIdleTime" -Value 0 -Force
-          
-          # Set session limits to unlimited
           Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "MaxConnectionTime" -Value 0 -Force
-          
-          # Keep disconnected sessions active indefinitely
           Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "KeepAliveEnable" -Value 1 -Force
           Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "KeepAliveInterval" -Value 1 -Force
-          
-          # Reset broken connections instead of logging off
           Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "fResetBroken" -Value 1 -Force
-          
-          # Allow reconnection from any client
           Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "fReconnectSame" -Value 0 -Force
-          
           Write-Host "RDP session timeout settings configured for persistent connections"
             
       - name: Create RDP4 profile by simulating login
         run: |
-          # Create user first
           $fixedPassword = "${{ secrets.RDP4_FIXED_PASSWORD }}"
           $securePass = ConvertTo-SecureString $fixedPassword -AsPlainText -Force
           
@@ -84,11 +83,9 @@ jobs:
               Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP4"
           }
           
-          # Force create profile by running a command as RDP4 user
           $securePassword = ConvertTo-SecureString "${{ secrets.RDP4_FIXED_PASSWORD }}" -AsPlainText -Force
           $credential = New-Object System.Management.Automation.PSCredential("RDP4", $securePassword)
           
-          # This will create the user profile
           Invoke-Command -ComputerName localhost -Credential $credential -ScriptBlock {
               Write-Host "RDP4 profile created successfully"
               $profilePath = $env:USERPROFILE
@@ -96,6 +93,7 @@ jobs:
           } -ErrorAction SilentlyContinue
           
           Write-Host "RDP4 profile setup attempted"      
+      
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
@@ -103,6 +101,7 @@ jobs:
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
+      
       - name: 🧹 PURGE any devices containing 'RDP4' (startup)
         run: |
           $hdr = @{ Authorization = "Bearer ${{ secrets.TAILSCALE_API_KEY }}" }
@@ -110,7 +109,6 @@ jobs:
           Write-Host "Searching for RDP4 devices to purge..."
           
           try {
-            # Use the correct API endpoint for listing devices
             $resp = Invoke-RestMethod -Method GET -Headers $hdr -Uri "https://api.tailscale.com/api/v2/tailnet/${{ secrets.TAILSCALE_TAILNET }}/devices" -ErrorAction Stop
             
             $RDP4Devices = $resp.devices | Where-Object { 
@@ -130,22 +128,18 @@ jobs:
                 Write-Warning "Failed to delete $($device.name): $($_.Exception.Message)"
               }
             }
-            
           } catch {
             Write-Warning "Device purge failed: $($_.Exception.Message)"
-            Write-Warning "Response: $($_.Exception.Response.StatusCode)"
-            Write-Warning "Make sure TAILSCALE_TAILNET is set to: hardiniamber1260.github.beta.tailscale.net"
           }      
+      
       - name: Establish Tailscale Connection with RDP4 hostname
         run: |
           $desiredHostname = "RDP4"
           Write-Host "Forcing hostname: $desiredHostname"
           
-          # Clean any existing local state
           & "$env:ProgramFiles\Tailscale\tailscale.exe" down
           Start-Sleep -Seconds 2
           
-          # Force the desired hostname
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=$desiredHostname --accept-routes=true --accept-dns=true --reset
           
           $tsIP = $null
@@ -160,8 +154,6 @@ jobs:
                   $tsHostname = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json 2>$null | ConvertFrom-Json | Select-Object -ExpandProperty Self | Select-Object -ExpandProperty DNSName -ErrorAction SilentlyContinue
                   if ($tsIP -and $tsHostname) { 
                       Write-Host "Successfully connected to Tailscale!"
-                      
-                      # Verify hostname is correct
                       if ($tsHostname -like "*RDP4*") {
                           Write-Host "✓ Hostname verified: $tsHostname"
                           break
@@ -188,6 +180,7 @@ jobs:
           Write-Host "IP: $tsIP"
           Write-Host "Hostname: $tsHostname"
           Write-Host "Connection Name: $desiredHostname"      
+      
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Testing RDP connection to: $env:TAILSCALE_IP"
@@ -215,6 +208,7 @@ jobs:
               Write-Error "RDP connection failed after $maxRetries attempts"
               exit 1
           }      
+      
       - name: Display Connection Information
         run: |
           Write-Host "`n=== RDP ACCESS INFORMATION ==="
@@ -230,10 +224,10 @@ jobs:
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "**Password:** `${{ secrets.RDP4_FIXED_PASSWORD }}"
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "**Session Started:** $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
           
-              
       - name: Copy Python script to RDP4 folder
         run: |
           Copy-Item -Path ".\automation_script.py" -Destination "C:\Users\RDP4\Downloads\automation_script.py" -Force		  
+      
       - name: Verify script creation in RDP4 C folder
         run: |
           $scriptPath = "C:\Users\RDP4\Downloads\automation_script.py"
@@ -243,9 +237,6 @@ jobs:
               Write-Host "File size: $( (Get-Item $scriptPath).Length ) bytes"
           } else {
               Write-Host "✗ Script was not created in RDP4 C folder"
-              Write-Host "Checking alternative locations..."
-              
-              # Check a few possible locations
               $possiblePaths = @(
                   "C:\Users\RDP4\Downloads\automation_script.py",
                   "C:\Users\RDP4\Documents\automation_script.py",
@@ -260,26 +251,80 @@ jobs:
               }
           }
      
-      - name: Keep RDP session active with Python script running
+      - name: Keep RDP session active with cancellation support
+        id: rdp-session
         run: |
+          # Create a cancellation flag file
+          $cancelFile = "C:\cancel_workflow.txt"
+          if (Test-Path $cancelFile) {
+              Remove-Item $cancelFile -Force
+          }
+          
           $endTime = (Get-Date).AddMinutes(350)  # 5 minutes less than total timeout
+          $checkInterval = 30
+          
+          Write-Host "RDP session started with cancellation support"
+          Write-Host "Session will run until: $endTime"
+          Write-Host "Check for cancellation every $checkInterval seconds"
           
           while ((Get-Date) -lt $endTime) {
-              # Check if Python process OR cmd process is still running
+              # Check for cancellation flag
+              if (Test-Path $cancelFile) {
+                  Write-Host "Cancellation detected. Cleaning up..."
+                  break
+              }
+              
+              # Check if GitHub has sent cancellation signal (environment variable)
+              if ($env:ACTIONS_STEP_TIMEOUT -eq "true") {
+                  Write-Host "GitHub cancellation signal received. Cleaning up..."
+                  break
+              }
+              
+              # Check if processes are running
               $pythonProcess = Get-Process python -ErrorAction SilentlyContinue
               $cmdProcess = Get-Process cmd -ErrorAction SilentlyContinue
               
               if ((-not $pythonProcess) -and (-not $cmdProcess)) {
                   Write-Host "Script stopped, restarting..."
                   $scriptPath = "C:\Users\RDP4\Downloads\automation.bat"
-                  Start-Process cmd.exe -ArgumentList "/k $scriptPath" -WindowStyle Normal
+                  if (Test-Path $scriptPath) {
+                      Start-Process cmd.exe -ArgumentList "/k $scriptPath" -WindowStyle Normal
+                  }
               }
               
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] RDP Active - Script running"
-              Start-Sleep -Seconds 30
+              $timeLeft = $endTime - (Get-Date)
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] RDP Active - Time left: $([int]$timeLeft.TotalMinutes) minutes"
+              Start-Sleep -Seconds $checkInterval
           }
           
-          Write-Host "RDP session completed successfully!"
+          Write-Host "RDP session completed or cancelled"
+      
+      - name: Cleanup on cancellation or completion
+        if: always()
+        run: |
+          Write-Host "Starting cleanup process..."
+          
+          # Create cancellation flag to stop the main loop
+          $cancelFile = "C:\cancel_workflow.txt"
+          "cancelled" | Out-File -FilePath $cancelFile -Encoding ASCII
+          
+          # Stop Tailscale gracefully
+          Write-Host "Stopping Tailscale..."
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" down 2>$null
+          Start-Sleep -Seconds 3
+          
+          # Kill any remaining processes
+          Write-Host "Stopping related processes..."
+          Stop-Process -Name "python" -Force -ErrorAction SilentlyContinue
+          Stop-Process -Name "cmd" -Force -ErrorAction SilentlyContinue
+          Stop-Process -Name "tailscale" -Force -ErrorAction SilentlyContinue
+          
+          # Disable RDP
+          Write-Host "Disabling RDP..."
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 1 -Force
+          Restart-Service -Name TermService -Force
+          
+          Write-Host "Cleanup completed"
             
       - name: 🧹 PURGE any devices containing 'RDP4' (shutdown)
         if: always()
@@ -289,7 +334,6 @@ jobs:
           Write-Host "Searching for RDP4 devices to purge..."
           
           try {
-            # Use the correct API endpoint for listing devices
             $resp = Invoke-RestMethod -Method GET -Headers $hdr -Uri "https://api.tailscale.com/api/v2/tailnet/${{ secrets.TAILSCALE_TAILNET }}/devices" -ErrorAction Stop
             
             $RDP4Devices = $resp.devices | Where-Object { 
@@ -309,9 +353,6 @@ jobs:
                 Write-Warning "Failed to delete $($device.name): $($_.Exception.Message)"
               }
             }
-            
           } catch {
             Write-Warning "Device purge failed: $($_.Exception.Message)"
-            Write-Warning "Response: $($_.Exception.Response.StatusCode)"
-            Write-Warning "Make sure TAILSCALE_TAILNET is set to: hardiniamber1260.github.beta.tailscale.net"
           }
